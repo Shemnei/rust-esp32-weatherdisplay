@@ -1,0 +1,14 @@
+# https://github.com/rust-lang/cargo/issues/7004
+# https://doc.rust-lang.org/cargo/reference/unstable.html#per-package-target
+
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+
+[dependencies]
+esp-idf-sys = { version = "0.33.1", default-features = false, features = ["std", "binstart", "native"] }
+
+[build-dependencies]
+embuild = { version = "0.31.2", default-features = false }

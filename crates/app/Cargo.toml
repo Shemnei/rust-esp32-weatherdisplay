@@ -23,14 +23,8 @@ esp-idf-sys = { version = "0.34.1", default-features = false, features = [
   "binstart",
   "native",
 ] }
+heapless = "0.8.0"
 log = "0.4.21"
 
 [build-dependencies]
 embuild = { version = "0.31.4", default-features = false }
-
-[[package.metadata.esp-idf-sys.extra_components]]
-remote_component = { name = "espressif/network_provisioning", version = "0.1.0" }
-
-[[package.metadata.esp-idf-sys.extra_components]]
-bindings_header = "extra_includes.h"
-

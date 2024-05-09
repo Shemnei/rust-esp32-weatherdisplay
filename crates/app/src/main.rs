@@ -1,11 +1,22 @@
 use std::ffi::CString;
-use std::time::Duration;
+use std::net::Ipv4Addr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use esp_idf_hal::io::Write;
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_svc::eventloop::EspEventLoop;
+use esp_idf_svc::http::server::{
+	self, fn_handler, ChainRoot, Connection, EspHttpServer, Handler,
+	Middleware,
+};
+use esp_idf_svc::http::Method;
+use esp_idf_svc::ipv4::{self, RouterConfiguration};
+use esp_idf_svc::netif::{EspNetif, NetifConfiguration, NetifStack};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{
-	BlockingWifi, ClientConfiguration, Configuration, EspWifi,
+	AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration,
+	Configuration, EspWifi,
 };
 use esp_idf_sys::esp;
 
@@ -28,14 +39,7 @@ fn get_device_service_name() -> CString {
 	.unwrap()
 }
 
-fn main() {
-	// It is necessary to call this function once. Otherwise some patches to the runtime
-	// implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
-	esp_idf_svc::sys::link_patches();
-
-	// Bind the log crate to the ESP Logging facilities
-	esp_idf_svc::log::EspLogger::initialize_default();
-
+fn ble_provision() {
 	let nvs = EspDefaultNvsPartition::take().unwrap();
 	let sys_loop = EspEventLoop::take().unwrap();
 	let peripherals = Peripherals::take().unwrap();
@@ -122,4 +126,180 @@ fn main() {
 		std::thread::park();
 		std::thread::sleep(Duration::from_secs(1));
 	}
+}
+
+fn scan() {
+	let sys_loop = EspEventLoop::take().unwrap();
+	let peripherals = Peripherals::take().unwrap();
+
+	let mut esp_wifi =
+		EspWifi::new(peripherals.modem, sys_loop.clone(), None).unwrap();
+	let mut wifi =
+		BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone()).unwrap();
+	wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+		..Default::default()
+	}))
+	.unwrap();
+	wifi.start().unwrap();
+
+	loop {
+		if let Ok(aps) = wifi.scan_n::<8>() {
+			println!(
+				"---------------------------------------------------------"
+			);
+			for ap in aps.0 {
+				println!("{ap:?}");
+			}
+		} else {
+			log::error!("Failed to scan for WiFi APs");
+		}
+		std::thread::sleep(Duration::from_secs(5));
+	}
+}
+
+fn captivity() {
+	let sys_loop = EspEventLoop::take().unwrap();
+	let peripherals = Peripherals::take().unwrap();
+
+	let netif = EspNetif::new_with_conf(&NetifConfiguration {
+		ip_configuration: ipv4::Configuration::Router(RouterConfiguration {
+			subnet: ipv4::Subnet {
+				gateway: Ipv4Addr::new(192, 168, 6, 1),
+				mask: ipv4::Mask(24),
+			},
+			dhcp_enabled: true,
+			dns: Some(Ipv4Addr::new(1, 1, 1, 1)),
+			secondary_dns: None,
+		}),
+		stack: NetifStack::Ap,
+		key: heapless::String::try_from("test123").unwrap(),
+		description: heapless::String::try_from("ap").unwrap(),
+		route_priority: 10,
+		custom_mac: None,
+	})
+	.unwrap();
+
+	let mut esp_wifi =
+		EspWifi::new(peripherals.modem, sys_loop.clone(), None).unwrap();
+	let _ = esp_wifi.swap_netif_ap(netif).unwrap();
+
+	let mut wifi =
+		BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone()).unwrap();
+	wifi.set_configuration(&Configuration::AccessPoint(
+		AccessPointConfiguration {
+			ssid: heapless::String::try_from("test123").unwrap(),
+			auth_method: AuthMethod::WPA2Personal,
+			password: heapless::String::try_from("hello_world_foo_bar_123")
+				.unwrap(),
+			..Default::default()
+		},
+	))
+	.unwrap();
+	wifi.start().unwrap();
+	wifi.wait_netif_up().unwrap();
+
+	// Server
+
+	pub struct CooldownMiddleware {
+		cooldown: Duration,
+		last_request: Mutex<Instant>,
+	}
+
+	impl CooldownMiddleware {
+		pub fn with_cooldown(cooldown: Duration) -> Self {
+			Self { cooldown, last_request: Mutex::new(Instant::now()) }
+		}
+	}
+
+	impl<C, H> Middleware<C, H> for CooldownMiddleware
+	where
+		C: Connection,
+		H: Handler<C>,
+	{
+		type Error = ();
+
+		fn handle(
+			&self,
+			connection: &mut C,
+			handler: &H,
+		) -> Result<(), Self::Error> {
+			log::info!("Called {}", connection.uri());
+
+			let now = Instant::now();
+			let mut last_request = self.last_request.lock().unwrap();
+			let valid = if last_request.elapsed() > self.cooldown {
+				// Set before handler call to prevent multiple simultaneous requests
+				*last_request = Instant::now();
+				true
+			} else {
+				false
+			};
+			drop(last_request);
+
+			if valid {
+				handler.handle(connection).map_err(|_| ())?;
+			} else {
+				log::warn!("Too many requests - Blocking");
+				connection
+					.initiate_response(429, None, &[])
+					.map_err(|_| ())?;
+			}
+
+			log::info!("\t>> Took: {:?}", now.elapsed());
+
+			Ok(())
+		}
+	}
+
+	let mut server = EspHttpServer::new(&server::Configuration {
+		stack_size: 9000,
+		..Default::default()
+	})
+	.unwrap();
+
+	server
+		.handler(
+			"/",
+			Method::Get,
+			CooldownMiddleware::with_cooldown(Duration::from_secs(5)).compose(
+				fn_handler(move |req| {
+					let mut res = req
+						.into_response(
+							200,
+							None,
+							&[("Content-Type", "text/html; charset=utf-8")],
+						)
+						.map_err(|_| ())?;
+					res.write_all(
+						br#"
+					<html>
+						<body>
+							<h1>Hello World</h1>
+						</body>
+					</html>
+				"#,
+					)
+					.map_err(|_| ())?;
+
+					Result::<(), ()>::Ok(())
+				}),
+			),
+		)
+		.unwrap();
+
+	loop {
+		std::thread::park();
+		std::thread::sleep(Duration::from_secs(1));
+	}
+}
+
+fn main() {
+	// It is necessary to call this function once. Otherwise some patches to the runtime
+	// implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
+	esp_idf_svc::sys::link_patches();
+
+	// Bind the log crate to the ESP Logging facilities
+	esp_idf_svc::log::EspLogger::initialize_default();
+
+	captivity();
 }

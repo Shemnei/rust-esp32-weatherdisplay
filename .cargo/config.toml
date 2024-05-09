@@ -1,2 +1,22 @@
+# START - App specific config
+# Would have liked to keep this in `crates/app` to allow different targets for this
+# workspace but esp-idf won't compile leading to no auto-completions for rust-analyzer ...
+# Issue: <https://github.com/rust-lang/cargo/issues/6179>
+
+[build]
+target = "xtensa-esp32-espidf"
+
+[target.xtensa-esp32-espidf]
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
 [env]
+# NOTE: The path is relative to the workspace ROOT
+ESP_IDF_SDKCONFIG_DEFAULTS = "crates/app/sdkconfig.defaults"
+# END - App specific config
 ESP_IDF_SYS_ROOT_CRATE = "app"
+ESP_IDF_VERSION = "v5.2.1"

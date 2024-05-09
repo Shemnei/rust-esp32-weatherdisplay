@@ -1,10 +1,8 @@
 [workspace]
+members = ["crates/app", "crates/lib"]
 resolver = "2"
-members = ["crates/drivers/*", "crates/app", "crates/lib"]
 
 [profile.release]
-opt-level = "s"
-
-[profile.dev]
-debug = true
-opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true

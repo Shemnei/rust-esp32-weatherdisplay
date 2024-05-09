@@ -11,5 +11,5 @@ rustflags = ["--cfg", "espidf_time64", "-C", "default-linker-libraries"]
 build-std = ["std", "panic_abort"]
 
 [env]
-ESP_IDF_VERSION = "v5.2.1"
-ESP_IDF_SDKCONFIG_DEFAULTS = "sdkconfig.defaults"
+# NOTE: The path is relative to the workspace ROOT
+ESP_IDF_SDKCONFIG_DEFAULTS = "crates/app/sdkconfig.defaults"
